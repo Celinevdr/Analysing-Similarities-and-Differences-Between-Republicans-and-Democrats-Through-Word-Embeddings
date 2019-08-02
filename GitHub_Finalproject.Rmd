@@ -1,0 +1,378 @@
+---
+title: Analysing Similarities and Differences Between Republicans and Democrats Through
+  Word Embeddings
+author: "Céline Van den Rul"
+date: "16th May 2019"
+output:
+  pdf_document:
+    toc: yes
+  html_notebook:
+    toc: yes
+---
+
+## Introduction
+
+The Republican and Democratic parties are deeply entrenched in US politics. They are said to stand for two opposite spectrums of the political arena, yet their differences have been debated. In 2008, Quentin Kidd published a paper analysing US parties' political platforms using the word scoring technique. His paper was written in response to the dissatisfied voters who complained about a lack of choice in US politics because of no real ideological or policy difference between the parties. He finds that, indeed, there is convincing evidence for these complaints to be true and reasonable. In contrast, a more recent study by the Pew Research Centre (2017) finds that the partisan divide between Republican and Democrats on fundamental political values is widening. This divide is said to have reached record level during the Obama presidency and is predicted to grow even larger under President Trump. 
+
+Which is it then? My aim is to contribute to this debate by analysing in more detail the differences and similarities between Democrats and Republicans through word embeddings. Indeed, what this debate is missing, in my opinion, is an analisys that goes beyond trying to classify Republican and Democrats on different political spectrums to one that looks at word word embeddings and how they appear differently in the narrative of the respective parties. Word embeddings can be powerul in capturing the context of a word in a document, with words with similar context occupying close spatial positions. As such, we can find out the context of a word such as 'immigration' in the Democratic platform and how it differs from the context in the Republican platform. 
+
+The dataset used here was made available by the Comparative Agendas Project (https://www.comparativeagendas.net) and is comprised of the Democratic and Republican party's platforms, both spanning a time frame from 1948 to 2016. The platforms are published every four years by the respective parties and outline the ideas, official principles and policy stances of the parties. Political scientists have argued that platforms serve as key resources for candidates to frame their electoral rhetoric, while at the same time also serving as "mechanisms of accountability"" - voters and party members can use the platform to hold candidates accountable to the ideas agreed upon by the party as a whole (Ballotpedia, 2016). As such, party plaftorms can be regarded as crucial corpora to analyse party similarities and differences. 
+
+I will start with a short descriptive narrative of the dataset. Then, I create a model fitting the word embeddings using GloVe and analyse word similarities using the cosine measure of similarity. I also run analogies. Finally, I end with a discussion of the ethical considerations to take into account when using word embeddings.   
+
+```{r echo=FALSE, results='hide',message=FALSE}
+# libraries
+library(quanteda)
+library(tidytext)
+library(tidyverse)
+library(dplyr)
+library(text2vec)
+library(tm)
+library(SnowballC)
+library(reshape2)
+library(topicmodels)
+library(ggplot2)
+```
+
+```{r echo=FALSE, results='hide',message=FALSE}
+DATA_DIR <- "/Users/celinevdr/Desktop/"
+Sys.setlocale('LC_ALL','C') 
+
+# Uploading the manifestos
+Dem <- read.csv(paste0(DATA_DIR,"US-Parties-democratic_party_platform-17.1.csv"))
+Rep <- read.csv(paste0(DATA_DIR,"US-Parties-republican_party_platform-17.1.csv"))
+
+# Setting/Cleaning the variables and keeping only those of interest
+Dem <- Dem %>% select(c(year, description))
+Dem$party <- "Democrat"
+Rep <- Rep %>% select(c(year, description))
+Rep$party <- "Republican"
+
+Dem$description <- gsub("_", " ", Dem$description)
+Rep$description <- gsub("_", " ", Rep$description)
+
+# Combining both manifestos in one dataset, creating id variable and randomizing rows
+manifesto_us <- rbind(Dem, Rep)
+manifesto_us$description <- as.character(manifesto_us$description)
+manifesto_us <- manifesto_us[sample(row.names (manifesto_us)), ]
+manifesto_us$id <- seq.int(nrow(manifesto_us))
+
+# Creating a dataset for democrats
+manifesto_democrats <- subset(manifesto_us, party=="Democrat")
+
+# Creating a dataset for republicans
+manifesto_republicans <- subset(manifesto_us, party=="Republican")
+ 
+# Creating a new dataset with aggregated observations (per year and per party)
+manifesto_grouped <- manifesto_us %>%
+  group_by(year,party) %>%
+  summarise(description=paste(description,collapse=''))
+manifesto_grouped$id <- paste(manifesto_grouped$party, "_", manifesto_grouped$year) 
+```
+
+## Descriptive narrative of the dataset
+
+The dataset is comprised of 36 platforms: 18 of them belong to the Republican party and the other 18 are from the Democratic party. I therefore have an equal distribution of party platforms for both parties. The dataset features the platforms' quasi-sentences as coding unit, giving me a large enough dataset with a total of 35789 observations. Here again, class balance is largely maintained, with 15953 quasi-sentences belonging to the Democratic party platforms and 19836 quasi-sentences belonging to the Republican party platforms. In addition, the dataset covers a period of over 60 years, from 1948 to 2016. I perform the basic pre-processing techniques (tokenization, stemming) and remove common stop-words for the purpose of the summary statistics described below.       
+```{r echo=FALSE, results='hide',message=FALSE}
+class_distribution <- manifesto_grouped %>% group_by(party) %>% summarize(class_count=n())
+print(head(class_distribution))
+
+class_distribution <- manifesto_us %>% group_by(party) %>% summarize(class_count=n())
+print(head(class_distribution))
+```
+
+```{r echo=FALSE, results='hide',message=FALSE}
+# Creating a corpus for summary statistics
+manifesto.c <- corpus(manifesto_grouped, text_field = "description")
+docid <- paste(manifesto_grouped$id)
+docnames(manifesto.c) <- docid
+
+stopwords = stopwords("english")
+
+# Basic pre-processing
+manifesto.token <- tokens(manifesto.c, what="word",
+              remove_symbols = TRUE,
+              remove_punct = TRUE,
+              remove_numbers = TRUE,
+              remove_url= TRUE,
+              remove_hyphens = FALSE,
+              verbose = TRUE,
+              remove_twitter = TRUE,
+              include_docvars = TRUE)
+
+manifesto.token <- tokens_remove(manifesto.token, stopwords("english"), padding = TRUE)
+
+# Creating a document feature matrix
+dfmat <- dfm(manifesto.c,
+          remove_punct = TRUE, remove = stopwords("english"))
+```
+
+### International affairs, security, health and economics at the centre of the platforms 
+
+In order to understand a bit more what the party platforms are about, I use an unsupervised classification of the documents which is topic modelling with the ```tidytext``` package. Latent Dirichlet allocation (LDA) is a particularly popular method for fitting a topic model and as such this is the one I will use in this paper. Setting the number of topics to 4, the visualization below show the most frequent terms in each topic. We can see that party platforms will most likely discuss issues relating to international affairs, health, security and economics.
+
+```{r echo=FALSE}
+manifesto_word <- manifesto_us %>%
+  unnest_tokens(word,description) %>%
+  anti_join(stop_words) %>%
+  mutate(word = wordStem(word)) %>%
+  count(id, word, sort=TRUE) %>%
+  ungroup()
+manifesto_dtm <- manifesto_word %>%
+  cast_dtm(id, word, n)
+
+lda <- LDA(manifesto_dtm, k = 4, control = list(seed = 1234))
+
+topics <- tidy(lda, matrix = "beta")
+
+top_terms <- topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+top_terms %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+```
+
+### Same usage of most frequent words: a first indication that they're not that different?
+
+The graphs below show the most frequent words used by Republicans and Democrats in their party platforms. It is stunning to see that they are extremely similar to each other. Both use "will" and "american" in highest frequency, followed by their party's name - democrat and republican - respectively.  The only slight difference is in the frequent use of the word "work" for the Democrats, in contrast to the more frequent use of "tax" for the Republicans. Can this be considered as a first indication that the party platforms are not that different? To some extent yes, in terms of rhetoric. However, although Republicans and Democrats may use the same words, the context in which they use them might differ, hence giving us more insights on their actual policy stances. This will be revealed in the following section. 
+
+```{r echo=FALSE}
+manifesto_words <- manifesto_us %>%
+  unnest_tokens(word, description) %>%
+  filter(!word %in% stopwords) %>%
+  mutate(word = wordStem(word)) %>%
+  count(party, word, sort=TRUE)
+
+manifesto_words %>%
+  arrange(desc(n)) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(party) %>% 
+  top_n(15) %>% 
+  ungroup() %>%
+  ggplot(aes(word, n, fill = party)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "n") +
+  facet_wrap(~party, ncol = 2, scales = "free") +
+  coord_flip()
+```
+
+## Analysis
+
+### A pre-view of similarities and differences between party platforms
+
+Before I dive into the analysis, the following code is useful to identify already the similarities and differences between party platforms, using a simple ```quanteda```function and testing similarity using the cosine measure of similarity. The closer the cosine score is to 1, the more similar are the documents. 
+
+The table below shows the documents with the lowest cosine score and as such, the most different. Naturally, democratic and republican platforms are usually in opposition with each other. The strongest difference is found between the republican party platform of 1948 with the democratic party platform of 2016. It is also interesting to see that there are differences in party platforms within the parties themselves. For instance, the republican party platform of 2004 exhibits a low cosine similarity score with the republican party platform of 1948. Hence, one can argue that there is evidence for differences in party platforms between parties but there is also a difference in party platforms within parties themselves, the more separate in years the platforms are. 
+
+```{r echo=FALSE}
+cosine_sim <- textstat_simil(dfmat, method = "cosine", margin = "documents")
+results <- (as.matrix(cosine_sim))
+pairs <- subset(melt(results), value!=1)
+pairs <- data.frame(t(apply(pairs, 1, sort)))
+pairs <- unique(pairs)
+pairs <- pairs [ ,c(3,2,1)]
+names(pairs)<- c("Platform1", "Platform2", "Cosine Similarity")
+pairs <- pairs[order(pairs$`Cosine Similarity`),] 
+head(pairs, n=10)
+```
+
+The table below shows the most similar party platforms, with similarity scores closest to 1. An interesting finding is that, in opposition to the previous table, most similar party platforms tend to also be closer in terms of years and within the parties themselves. 
+
+```{r echo=FALSE}
+pairs <- pairs[order(pairs$`Cosine Similarity`, decreasing = TRUE),] 
+head(pairs, n=10)
+```
+
+### Model fitting: Word embeddings with GloVe
+
+In order to set up my model to analyse similarities between Republican and Democratic party platforms, I begin by constructing a document-term matrix (dtm). In other words, the aim here is to vectorize text by creating a map from words to a vector space. I do this using the ```text2vec```package. For the sake of comparison, I also set up a document-term matrix for the Republican party platforms and one for the Democrat party platforms. 
+
+```{r echo=FALSE, results='hide',message=FALSE}
+# Constructing a document-term matrix
+prep_fun = tolower
+tok_fun = word_tokenizer
+
+## For the whole dataset
+manifesto_tokens = itoken(manifesto_us$description, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun,
+             ids = manifesto_us$id, 
+             progressbar = FALSE)
+
+vocab_all = create_vocabulary(manifesto_tokens)
+
+vectorizer_all = vocab_vectorizer(vocab_all)
+dtm = create_dtm(manifesto_tokens, vectorizer_all)
+
+## For the democrats
+manifesto_democrat = itoken(manifesto_democrats$description, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun,
+             ids = manifesto_democrats$id, 
+             progressbar = FALSE)
+
+vocab_d = create_vocabulary(manifesto_democrat)
+
+vectorizer_d = vocab_vectorizer(vocab_d)
+dtm_d = create_dtm(manifesto_democrat, vectorizer_d)
+
+# For the republicans
+manifesto_republican = itoken(manifesto_republicans$description, 
+             preprocessor = prep_fun, 
+             tokenizer = tok_fun,
+             ids = manifesto_republicans$id, 
+             progressbar = FALSE)
+
+vocab_r = create_vocabulary(manifesto_republican)
+
+vectorizer_r = vocab_vectorizer(vocab_r)
+dtm_r = create_dtm(manifesto_republican, vectorizer_r)
+```
+
+I then set up the GloVe algorithm. To do this, I first make sure that my vocabulary contains words that are not too uncommon and thus filtering it with ```prune_vocabulary``` and setting the minimum frequency of words to appear at least five times. The reason behind this is that one cannot calculate a meaningful vector for a word that appears only once in the entire corpus. I also use a window of 5 for the context words. 
+
+```{r results='hide',message=FALSE}
+# Setting up the Glove Algorithm
+## For the whole dataset
+vocab_all = prune_vocabulary(vocab_all, term_count_min = 5L)
+vectorizer_all = vocab_vectorizer(vocab_all)
+tcm = create_tcm(manifesto_tokens, vectorizer_all, skip_grams_window = 5L)
+glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab_all, x_max = 10)
+wv_main = glove$fit_transform(tcm, n_iter = 50, convergence_tol = 0.00001)
+wv_context = glove$components
+word_vectors =  wv_main + t(wv_context)
+
+## For the democrats
+vocab_d = prune_vocabulary(vocab_d, term_count_min = 5L)
+vectorizer_d = vocab_vectorizer(vocab_d)
+tcm.d = create_tcm(manifesto_democrat, vectorizer_d, skip_grams_window = 5L)
+glove_d = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab_d, x_max = 10)
+wv_maind = glove_d$fit_transform(tcm.d, n_iter = 50, convergence_tol = 0.00001)
+wv_contextd = glove_d$components
+word_vectorsd =  wv_maind + t(wv_contextd)
+
+## For the republicans
+vocab_r = prune_vocabulary(vocab_r, term_count_min = 5L)
+vectorizer_r = vocab_vectorizer(vocab_r)
+tcm.r = create_tcm(manifesto_republican, vectorizer_r, skip_grams_window = 5L)
+glove_r = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab_r, x_max = 10)
+wv_mainr = glove_r$fit_transform(tcm.r, n_iter = 50, convergence_tol = 0.00001)
+wv_contextr = glove_r$components
+word_vectorsr =  wv_mainr + t(wv_contextr)
+```
+
+### Word embeddings reveal there are strong differences between Democrats and Republicans  
+
+With the model set up, I examine the similarities between party platforms by looking for the closest words to "immigration", "americans" and "welfare" in each platform respectively. The measure of similarity taken for this analysis is here again cosine similarity.
+
+For the word immigration, the differences between Republicans and Democrats in the word's context are quite striking. Indeed, it is puzzling to see the words "servants", "illegal" and "corrupt" coming up in the republican party platforms as closest to the word "immigration". In contrast, for the democrats, "immigration" is more likely to be associated with words such as "transportation" (probably in a context of trade), "land" or "reform". 
+
+```{r}
+# For Republicans
+immigration_r = word_vectorsr["immigration", , drop=F]
+cos_sim_immigration = sim2(x = word_vectorsr, y = immigration_r, method = "cosine", norm = "l2")
+head(sort(cos_sim_immigration[,1], decreasing = T), 10)
+```
+
+```{r}
+# For Democrats
+immigration_d = word_vectorsd["immigration", , drop=F]
+cos_sim_immigration = sim2(x = word_vectorsd, y = immigration_d, method = "cosine", norm = "l2")
+head(sort(cos_sim_immigration[,1], decreasing = T), 10)
+```
+
+It was also interesting to analyse the word "americans". As shown in the first descriptive section of this paper, americans is one of the most frequent words used by both Democrats and Republicans. As word embeddings reveal, the context in which the word is used is slightly different. Although, "americans" will most likely be associated with "millions", "people", "families", "work" in both cases, it is intersting to see the word "older" appearing for the Republicans, in contrast to the words "young" and "students" appearing for the Democrats. This is helpful in showing us that Republicans appeal more to the older population when referring to americans, while Democrats would appeal more to the youth. 
+
+```{r}
+# For Republicans
+americans_r = word_vectorsr["americans", , drop=F]
+cos_sim_americans = sim2(x = word_vectorsr, y = americans_r, method = "cosine", norm = "l2")
+head(sort(cos_sim_americans[,1], decreasing = T), 15)
+```
+
+```{r}
+# For Democrats
+americans_d = word_vectorsd["americans", , drop=F]
+cos_sim_americans = sim2(x = word_vectorsd, y = americans_d, method = "cosine", norm = "l2")
+head(sort(cos_sim_americans[,1], decreasing = T), 15)
+```
+
+Finally, we compare Republicans and Democrats in the context found for the word "welfare". Here again, although some similar words appear between the two parties, it is interesting to see the words "health" and "child" stand out in the platforms of Democrats, in contrast to the words "education", "tax" or "fraud" in the Republican's platforms. 
+
+```{r}
+# For Republicans
+americans_r = word_vectorsr["welfare", , drop=F]
+cos_sim_americans = sim2(x = word_vectorsr, y = americans_r, method = "cosine", norm = "l2")
+head(sort(cos_sim_americans[,1], decreasing = T), 15)
+```
+
+```{r}
+# For Democrats
+americans_d = word_vectorsd["welfare", , drop=F]
+cos_sim_americans = sim2(x = word_vectorsd, y = americans_d, method = "cosine", norm = "l2")
+head(sort(cos_sim_americans[,1], decreasing = T), 15)
+```
+
+### Analogies
+
+Word embeddings gained frame in the world of automated text analysis when it was demonstrated that they could be used to identify analogies. In this case, analysing these analogies allows to draw further differences between Republican and Democrats. 
+
+The first analogy is tested on the word "china". The code below shows that china is to the Democrats what Russia is to the Republicans - quite an interesting result. 
+
+```{r}
+china = word_vectors["china", , drop = FALSE] - 
+  word_vectors["democrat", , drop = FALSE] + 
+  word_vectors["republican", , drop = FALSE]
+cos_sim = sim2(x = word_vectors, y = china, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 5)
+```
+
+The second analogy is performed on "obama". I find that Obama is to the Republicans what Qayle is to the democrats. Here again, an interesting result: from the Republican party, Dan Quayle was the vice president of the United States from 1989 to 1993. Dan Quayle's Wikipedia is however not very glorifying: he reportedly was widely ridiculed in the media and the general pulic for making e.g. a series of scientifically incorrect statements (e.g.saying Mars is essentially in the same orbit as the Earth and the same distance from the Sun). It is therefore not a very glorifying association for former President Obama.  
+
+```{r}
+obama = word_vectors["obama", , drop = FALSE] - 
+  word_vectors["republican", , drop = FALSE] + 
+  word_vectors["democrat", , drop = FALSE]
+cos_sim = sim2(x = word_vectors, y = obama, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 5)
+```
+
+## Discussion
+
+### Main findings
+
+Here, I aimed to contribute to the debate on whether or not there are differences between the Republicans and the Democrats. By representing words through vectors, word embeddings are a powerful tool to understand in more detail the differences in words that, although used by both Democrats and Republicans, appear in different contexts and are associated with different words. In this sense, I was able to find interesting differences in the use of the words "immigration", "welfare" and "americans" that are quite telling in revealing policy stances. Analogies also allowed me to draw further differences in the meaning of certain words for Republicans and Democrats. 
+
+### Ethical and governance issues
+
+Although word embeddings can be very useful for the type of analysis performed in this paper, their implementation should be considered carefully. Unfortunately, language is a powerful means through which race, gender discrimination and stereotypical biases are reproduced. It is therefore crucial to consider the implication that these biases could have on automated tasks which are based on processing human language. 
+
+How and why is this a problem?
+
+Word embeddings are usually trained on massive text databases like Wikipedia dumps or Google News, thus inheriting from them the biases pointed out previously. A popular example used in the literature is the king and queen example. As humans, we know that king relates to a male figure while queen refers to a female figure. But how can a machine understand this? Word embeddings allow machines to capture these relations - including gender - by taking the difference between the vector representations of king and man. If one tries to project the woman vector through the same direction, one would thus get the word queen. The information that queen is the feminine of king has never been fed directly to the model, but the model is able to capture the relation through word embeddings. 
+
+This can become problematic if we think of implementing it in environments such as job recruitment processes or translation services. In these cases, the stereotypes can really strike in and actually implify discrimination towards one group. A popular example given in this case is the relation between man:programmer = female, which will yield the result homemaker. The embedding model will see programmer closer with male than female because of our own social perception we have of this job which is reflected in the language we use. 
+
+Another example can be taken from automation in cv scanning. Let's assume the company decided to train the word embeddings on a large dataset such as Wikipedia for instance. Chances to find positive adjectives like crafty, brilliant and clever in a motivation letter are high, but it was also found that these terms were closer to man than to woman in the pretrained embedding space. This gender bias will therefore be reproduced in the automated task. 
+
+Gender inequality, race discrimination and other stereotypical biases are deeply rooted in our society and our use of the language. As such, the application of machine learning algorithms on this language runs the risk of propagating and amplifying all these biases. Algorithm are therefore never 'neutral' because our language itself is not neutral.  
+
+
+
+
+
+
+
+
+
+
+
+
+
